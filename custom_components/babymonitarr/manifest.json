@@ -1,0 +1,13 @@
+{
+  "domain": "babymonitarr",
+  "name": "BabyMonitarr",
+  "codeowners": ["@Inrego"],
+  "config_flow": true,
+  "dependencies": ["zeroconf"],
+  "documentation": "https://github.com/Inrego/babymonitarr-hacs",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/Inrego/babymonitarr-hacs/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
