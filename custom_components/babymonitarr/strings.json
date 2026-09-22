@@ -40,6 +40,9 @@
       },
       "stream_online": {
         "name": "Stream online"
+      },
+      "casting": {
+        "name": "Casting"
       }
     },
     "sensor": {
@@ -51,6 +54,9 @@
       },
       "connected_viewers": {
         "name": "Connected viewers"
+      },
+      "cast_targets": {
+        "name": "Cast targets"
       }
     },
     "switch": {
@@ -70,6 +76,47 @@
       },
       "volume_adjustment": {
         "name": "Volume adjustment"
+      }
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "sound_detected": "Sound detected"
+    }
+  },
+  "services": {
+    "cast_room": {
+      "name": "Cast room",
+      "description": "Starts casting a room to Cast receivers. Without targets the room's saved selection is used.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "Name or id of the BabyMonitarr room to cast."
+        },
+        "targets": {
+          "name": "Targets",
+          "description": "Cast receivers to start, by name or device id. Omit to use the room's saved targets."
+        }
+      }
+    },
+    "stop_cast": {
+      "name": "Stop cast",
+      "description": "Stops every cast session for a room.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "Name or id of the BabyMonitarr room to stop casting."
+        }
+      }
+    },
+    "snapshot": {
+      "name": "Snapshot (not supported)",
+      "description": "Not supported by this backend: BabyMonitarr has no still-image capability, so this service always fails with that explanation. The name is reserved for when a still endpoint exists.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "Name or id of the BabyMonitarr room."
+        }
       }
     }
   }

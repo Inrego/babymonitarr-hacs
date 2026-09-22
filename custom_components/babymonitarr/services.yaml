@@ -1,0 +1,28 @@
+cast_room:
+  fields:
+    room:
+      required: true
+      example: Nursery
+      selector:
+        text:
+    targets:
+      required: false
+      example: '["Living Room TV"]'
+      selector:
+        object:
+
+stop_cast:
+  fields:
+    room:
+      required: true
+      example: Nursery
+      selector:
+        text:
+
+snapshot:
+  fields:
+    room:
+      required: true
+      example: Nursery
+      selector:
+        text:

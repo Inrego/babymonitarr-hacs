@@ -11,21 +11,27 @@ from the WebSocket receive loop. That is the idiomatic shape for ``local_push``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import BabyMonitarrClient
 from .const import (
     DOMAIN,
     EVENT_SOUND_DETECTED,
+    FEATURE_CAST,
     MSG_ACK,
     MSG_ACTIVE_ROOM,
+    MSG_CAST_DEVICES,
+    MSG_CAST_START_RESULT,
+    MSG_CAST_STATE,
     MSG_CONNECTED_VIEWERS,
     MSG_ERROR,
     MSG_GLOBAL_SETTINGS,
@@ -39,11 +45,16 @@ from .const import (
     MSG_SOUND_LEVEL,
     MSG_SOUND_STATE,
     MSG_STREAM_ONLINE,
+    SNAPSHOT_TIMEOUT,
 )
+
+if TYPE_CHECKING:
+    from .cast_proxy import BabyMonitarrCastProxy
 
 _LOGGER = logging.getLogger(__name__)
 
 NewRoomsCallback = Callable[[list[int]], None]
+SnapshotCallback = Callable[[], None]
 
 
 @dataclass(slots=True)
@@ -70,6 +81,52 @@ class RoomState:
 
 
 @dataclass(slots=True)
+class CastDevice:
+    """A Cast receiver as ``cast.devices`` describes it.
+
+    Identity is the mDNS TXT ``id`` whichever path found the device, so a receiver
+    the backend browsed itself and one this integration proxied collapse to one
+    row - protocol section 8.2.
+    """
+
+    device_id: str
+    name: str
+    model: str | None = None
+    host: str | None = None
+    port: int | None = None
+    origin: str | None = None
+    manually_added: bool = False
+    is_video_capable: bool = False
+    is_group: bool = False
+    is_online: bool = False
+    last_seen_at: str | None = None
+    casting_room_id: int | None = None
+    last_error: str | None = None
+
+
+@dataclass(slots=True)
+class CastSession:
+    """One live cast session."""
+
+    device_id: str
+    video: bool = False
+    started_at: str | None = None
+
+
+@dataclass(slots=True)
+class CastRoomState:
+    """Per-room cast state, from ``cast.state``.
+
+    ``targets`` is the saved selection and ``sessions`` is what is actually
+    running; they are independent.
+    """
+
+    casting: bool = False
+    targets: list[str] = field(default_factory=list)
+    sessions: list[CastSession] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class BabyMonitarrData:
     """Everything the entities read."""
 
@@ -84,10 +141,26 @@ class BabyMonitarrData:
     active_room_id: int | None = None
     active_room_name: str | None = None
     connected_viewers: int | None = None
+    cast_devices: dict[str, CastDevice] = field(default_factory=dict)
+    cast_states: dict[int, CastRoomState] = field(default_factory=dict)
 
     def state(self, room_id: int) -> RoomState:
         """Return the state for a room, creating an empty one if unseen."""
         return self.room_states.setdefault(room_id, RoomState())
+
+    def cast_state(self, room_id: int) -> CastRoomState:
+        """Return the cast state for a room, creating an empty one if unseen."""
+        return self.cast_states.setdefault(room_id, CastRoomState())
+
+    @property
+    def cast_supported(self) -> bool:
+        """Whether the connected backend advertises the cast feature."""
+        return FEATURE_CAST in self.features
+
+    def device_name(self, device_id: str) -> str:
+        """The friendly name of a receiver, falling back to its id."""
+        device = self.cast_devices.get(device_id)
+        return device.name if device is not None and device.name else device_id
 
 
 class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
@@ -105,7 +178,12 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         self.config_entry = entry
         self.client = client
         self.data = BabyMonitarrData()
+        # Owned by __init__.py; declared here so the services and platforms can
+        # reach it through the entry's runtime data.
+        self.cast_proxy: BabyMonitarrCastProxy | None = None
         self._new_rooms_callbacks: list[NewRoomsCallback] = []
+        self._snapshot_callbacks: list[SnapshotCallback] = []
+        self._snapshot_received = asyncio.Event()
         client.set_callbacks(self.handle_message, self.handle_connection)
 
     # --- entity plumbing ----------------------------------------------------
@@ -124,6 +202,31 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         for cb in self._new_rooms_callbacks:
             cb(room_ids)
 
+    @callback
+    def async_add_snapshot_callback(self, cb: SnapshotCallback) -> CALLBACK_TYPE:
+        """Register a hook fired whenever the backend starts a fresh snapshot.
+
+        The cast proxy uses it to re-push ``cast.discovered`` on reconnect, which
+        protocol section 5 asks for: proxy-discovered devices are persisted with
+        their last known host, but only HA can refresh them.
+        """
+        self._snapshot_callbacks.append(cb)
+
+        @callback
+        def _remove() -> None:
+            self._snapshot_callbacks.remove(cb)
+
+        return _remove
+
+    async def async_wait_for_snapshot(self, timeout: float = SNAPSHOT_TIMEOUT) -> None:
+        """Wait until the backend has finished pushing its snapshot.
+
+        Setup needs this before it can read ``hello.features`` or hand the room
+        list to the platforms. Raises :class:`TimeoutError` if it never arrives.
+        """
+        async with asyncio.timeout(timeout):
+            await self._snapshot_received.wait()
+
     # --- transport callbacks ------------------------------------------------
 
     @callback
@@ -134,6 +237,7 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
             # Everything derived is unknown until the next snapshot; the backend
             # re-sends the full snapshot on connect, so we do not clear the room
             # list (that would churn entities on every blip).
+            self._snapshot_received.clear()
             _LOGGER.debug("BabyMonitarr disconnected")
         self.async_set_updated_data(self.data)
 
@@ -222,6 +326,72 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
 
     def _on_ready(self, data: dict[str, Any]) -> bool:
         _LOGGER.debug("BabyMonitarr snapshot complete: %d room(s)", len(self.data.rooms))
+        self._snapshot_received.set()
+        for cb in list(self._snapshot_callbacks):
+            cb()
+        return True
+
+    def _on_cast_devices(self, data: dict[str, Any]) -> bool:
+        raw = data.get("devices")
+        if not isinstance(raw, list):
+            return False
+        devices: dict[str, CastDevice] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            device_id = item.get("device_id")
+            if not isinstance(device_id, str) or not device_id:
+                continue
+            port = item.get("port")
+            casting_room_id = item.get("casting_room_id")
+            devices[device_id] = CastDevice(
+                device_id=device_id,
+                name=str(item.get("name") or device_id),
+                model=item.get("model") or None,
+                host=item.get("host") or None,
+                port=port if isinstance(port, int) else None,
+                origin=item.get("origin") or None,
+                manually_added=bool(item.get("manually_added", False)),
+                is_video_capable=bool(item.get("is_video_capable", False)),
+                is_group=bool(item.get("is_group", False)),
+                is_online=bool(item.get("is_online", False)),
+                last_seen_at=item.get("last_seen_at") or None,
+                casting_room_id=(
+                    casting_room_id if isinstance(casting_room_id, int) else None
+                ),
+                last_error=item.get("last_error") or None,
+            )
+        self.data.cast_devices = devices
+        return True
+
+    def _on_cast_state(self, data: dict[str, Any]) -> bool:
+        room_id = data.get("room_id")
+        if not isinstance(room_id, int):
+            return False
+        state = self.data.cast_state(room_id)
+        state.casting = bool(data.get("casting", False))
+        targets = data.get("targets")
+        state.targets = (
+            [t for t in targets if isinstance(t, str)]
+            if isinstance(targets, list)
+            else []
+        )
+        sessions = data.get("sessions")
+        state.sessions = []
+        if isinstance(sessions, list):
+            for item in sessions:
+                if not isinstance(item, dict):
+                    continue
+                device_id = item.get("device_id")
+                if not isinstance(device_id, str):
+                    continue
+                state.sessions.append(
+                    CastSession(
+                        device_id=device_id,
+                        video=bool(item.get("video", False)),
+                        started_at=item.get("started_at") or None,
+                    )
+                )
         return True
 
     def _on_sound_level(self, data: dict[str, Any]) -> bool:
@@ -304,6 +474,91 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         """Write one global setting. The backend echoes a ``global_settings``."""
         await self.client.async_set_global_settings(**{field_name: value})
 
+    # --- cast commands used by the services --------------------------------
+
+    async def async_cast_start(
+        self, room_id: int, device_ids: list[str] | None
+    ) -> dict[str, Any]:
+        """Start casting a room and return the ``cast.start_result`` payload.
+
+        A partial failure is a success at the protocol level, so the caller gets
+        both ``started`` and ``failed`` and decides what to say about them.
+        """
+        msg_type, data = await self.client.async_cast_start(room_id, device_ids)
+        _raise_on_error(msg_type, data)
+        if msg_type != MSG_CAST_START_RESULT:
+            raise HomeAssistantError(
+                f"Unexpected reply to cast.start: {msg_type}"
+            )
+        return data or {}
+
+    async def async_cast_stop(self, room_id: int) -> None:
+        """Stop every cast session for a room."""
+        msg_type, data = await self.client.async_cast_stop(room_id)
+        _raise_on_error(msg_type, data)
+
+    async def async_cast_set_targets(
+        self, room_id: int, device_ids: list[str]
+    ) -> None:
+        """Replace a room's saved target selection."""
+        msg_type, data = await self.client.async_cast_set_targets(room_id, device_ids)
+        _raise_on_error(msg_type, data)
+
+    async def async_cast_discovered(self, devices: list[dict[str, Any]]) -> None:
+        """Push the mDNS proxy's current set of receivers."""
+        await self.client.async_cast_discovered(devices)
+
+    # --- lookups the services need ------------------------------------------
+
+    def resolve_room(self, room: str | int) -> int:
+        """Turn a room name or id from a service call into a room id."""
+        if isinstance(room, int) or (isinstance(room, str) and room.isdigit()):
+            room_id = int(room)
+            if room_id in self.data.rooms:
+                return room_id
+            raise ServiceValidationError(f"No BabyMonitarr room with id {room_id}")
+        wanted = str(room).casefold()
+        for info in self.data.rooms.values():
+            if info.name.casefold() == wanted:
+                return info.room_id
+        known = ", ".join(sorted(info.name for info in self.data.rooms.values()))
+        raise ServiceValidationError(
+            f"No BabyMonitarr room named {room!r}. Known rooms: {known or 'none'}"
+        )
+
+    def resolve_targets(self, targets: list[str]) -> list[str]:
+        """Turn target names or ids into device ids, rejecting unknown ones."""
+        resolved: list[str] = []
+        by_name = {
+            device.name.casefold(): device.device_id
+            for device in self.data.cast_devices.values()
+        }
+        for target in targets:
+            if target in self.data.cast_devices:
+                resolved.append(target)
+                continue
+            device_id = by_name.get(target.casefold())
+            if device_id is None:
+                known = ", ".join(
+                    sorted(d.name for d in self.data.cast_devices.values())
+                )
+                raise ServiceValidationError(
+                    f"Unknown Cast target {target!r}. Known devices: {known or 'none'}"
+                )
+            resolved.append(device_id)
+        return resolved
+
+
+def _raise_on_error(msg_type: str, data: dict[str, Any] | None) -> None:
+    """Turn an ``error`` reply into a Home Assistant error."""
+    if msg_type != MSG_ERROR:
+        return
+    payload = data or {}
+    raise HomeAssistantError(
+        f"BabyMonitarr rejected the command ({payload.get('code', 'error')}): "
+        f"{payload.get('message', 'no detail')}"
+    )
+
 
 _HANDLERS: dict[str, Callable[[BabyMonitarrCoordinator, dict[str, Any]], bool]] = {
     MSG_HELLO: BabyMonitarrCoordinator._on_hello,
@@ -317,6 +572,8 @@ _HANDLERS: dict[str, Callable[[BabyMonitarrCoordinator, dict[str, Any]], bool]] 
     MSG_SOUND_STATE: BabyMonitarrCoordinator._on_sound_state,
     MSG_SOUND_EVENT: BabyMonitarrCoordinator._on_sound_event,
     MSG_STREAM_ONLINE: BabyMonitarrCoordinator._on_stream_online,
+    MSG_CAST_DEVICES: BabyMonitarrCoordinator._on_cast_devices,
+    MSG_CAST_STATE: BabyMonitarrCoordinator._on_cast_state,
     MSG_MONITORING: BabyMonitarrCoordinator._on_monitoring,
     MSG_ERROR: BabyMonitarrCoordinator._on_error,
     MSG_ACK: BabyMonitarrCoordinator._ignore,

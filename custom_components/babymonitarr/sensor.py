@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,15 +18,29 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .coordinator import BabyMonitarrCoordinator, BabyMonitarrData, RoomState
+from .const import ATTR_CASTING_TO, ATTR_TARGET_IDS, ATTR_TARGET_NAMES
+from .coordinator import (
+    BabyMonitarrCoordinator,
+    BabyMonitarrData,
+    CastRoomState,
+    RoomState,
+)
 from .entity import BabyMonitarrGlobalEntity, BabyMonitarrRoomEntity
 
 
 @dataclass(frozen=True, kw_only=True)
 class BabyMonitarrRoomSensorDescription(SensorEntityDescription):
-    """Describes a per-room sensor."""
+    """Describes a per-room sensor.
 
-    value_fn: Callable[[RoomState], StateType]
+    ``value_fn`` gets both the room's live state and its cast state, because the
+    two arrive on separate messages (``room_state`` and ``cast.state``).
+    """
+
+    value_fn: Callable[[RoomState, CastRoomState], StateType]
+    attributes_fn: (
+        Callable[[BabyMonitarrCoordinator, RoomState, CastRoomState], dict[str, Any]]
+        | None
+    ) = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -43,7 +58,26 @@ ROOM_SENSORS: tuple[BabyMonitarrRoomSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfSoundPressure.DECIBEL,
         suggested_display_precision=1,
-        value_fn=lambda state: state.level_db,
+        value_fn=lambda state, cast: state.level_db,
+    ),
+    BabyMonitarrRoomSensorDescription(
+        key="cast_targets",
+        translation_key="cast_targets",
+        # The state is the number of SAVED targets - a name list would blow past
+        # the 255-character state limit on a house with several receivers. The
+        # ids, names and live sessions are on the attributes.
+        native_unit_of_measurement="targets",
+        value_fn=lambda state, cast: len(cast.targets),
+        attributes_fn=lambda coordinator, state, cast: {
+            ATTR_TARGET_IDS: list(cast.targets),
+            ATTR_TARGET_NAMES: [
+                coordinator.data.device_name(device_id) for device_id in cast.targets
+            ],
+            ATTR_CASTING_TO: [
+                coordinator.data.device_name(session.device_id)
+                for session in cast.sessions
+            ],
+        },
     ),
 )
 
@@ -106,7 +140,18 @@ class BabyMonitarrRoomSensor(BabyMonitarrRoomEntity, SensorEntity):
     @property
     def native_value(self) -> StateType:
         """Return the current value."""
-        return self.entity_description.value_fn(self.room_state)
+        return self.entity_description.value_fn(
+            self.room_state, self.room_cast_state
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return the description's extra attributes, if it has any."""
+        if self.entity_description.attributes_fn is None:
+            return None
+        return self.entity_description.attributes_fn(
+            self.coordinator, self.room_state, self.room_cast_state
+        )
 
 
 class BabyMonitarrGlobalSensor(BabyMonitarrGlobalEntity, SensorEntity):

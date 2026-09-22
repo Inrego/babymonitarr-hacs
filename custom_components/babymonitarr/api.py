@@ -18,6 +18,11 @@ import aiohttp
 from yarl import URL
 
 from .const import (
+    CMD_CAST_DISCOVERED,
+    CMD_CAST_SET_TARGETS,
+    CMD_CAST_START,
+    CMD_CAST_STOP,
+    CMD_CAST_STOP_DEVICE,
     CMD_GET_STATE,
     CMD_PING,
     CMD_SET_ACTIVE_ROOM,
@@ -27,6 +32,7 @@ from .const import (
     PROTOCOL_VERSION,
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
+    REQUEST_TIMEOUT,
     WS_PATH,
 )
 
@@ -89,6 +95,7 @@ class BabyMonitarrClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._task: asyncio.Task[None] | None = None
         self._first_attempt: asyncio.Future[None] | None = None
+        self._pending: dict[str, asyncio.Future[tuple[str, dict[str, Any] | None]]] = {}
         self._closing = False
         self._msg_id = 0
         # The header is preferred; a proxy that strips it pushes us onto the
@@ -226,6 +233,9 @@ class BabyMonitarrClient:
                     _LOGGER.exception("BabyMonitarr receive loop failed")
                 finally:
                     self._ws = None
+                    self._fail_pending(
+                        BabyMonitarrConnectionError("Connection lost")
+                    )
                     self._notify_connection(False)
                 if self._closing:
                     return
@@ -259,6 +269,8 @@ class BabyMonitarrClient:
             if not isinstance(data, dict):
                 data = None
             ref = frame.get("ref")
+            if isinstance(ref, str):
+                self._resolve_pending(ref, msg_type, data)
             if self._message_callback is not None:
                 # Unknown types reach the callback too; it ignores what it does
                 # not know, which is what keeps webrtc.* and cast.* additive.
@@ -277,6 +289,21 @@ class BabyMonitarrClient:
             future.set_exception(err)
         return True
 
+    def _resolve_pending(
+        self, ref: str, msg_type: str, data: dict[str, Any] | None
+    ) -> None:
+        """Hand a ref-carrying reply to whoever is waiting for it."""
+        future = self._pending.pop(ref, None)
+        if future is not None and not future.done():
+            future.set_result((msg_type, data))
+
+    def _fail_pending(self, err: BabyMonitarrError) -> None:
+        """Fail every in-flight request, e.g. because the socket went away."""
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(err)
+        self._pending.clear()
+
     def _notify_connection(self, connected: bool) -> None:
         if self._connection_callback is not None:
             self._connection_callback(connected)
@@ -291,10 +318,17 @@ class BabyMonitarrClient:
         self, msg_type: str, data: dict[str, Any] | None = None
     ) -> str:
         """Send one command frame and return the ``id`` it was sent with."""
+        msg_id = self._next_id()
+        await self._async_send_frame(msg_id, msg_type, data)
+        return msg_id
+
+    async def _async_send_frame(
+        self, msg_id: str, msg_type: str, data: dict[str, Any] | None
+    ) -> None:
+        """Put one command frame on the wire."""
         ws = self._ws
         if ws is None or ws.closed:
             raise BabyMonitarrConnectionError("Not connected")
-        msg_id = self._next_id()
         frame: dict[str, Any] = {"v": PROTOCOL_VERSION, "type": msg_type, "id": msg_id}
         if data is not None:
             frame["data"] = data
@@ -302,7 +336,34 @@ class BabyMonitarrClient:
             await ws.send_json(frame)
         except (aiohttp.ClientError, ConnectionResetError) as err:
             raise BabyMonitarrConnectionError(str(err)) from err
-        return msg_id
+
+    async def async_request(
+        self,
+        msg_type: str,
+        data: dict[str, Any] | None = None,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Send a command and wait for the frame that echoes its ``id`` as ``ref``.
+
+        Returns ``(reply_type, reply_data)``. The caller decides what to make of
+        the type: a command may be answered with ``ack``, with ``error``, or with
+        a purpose-built reply such as ``cast.start_result``.
+        """
+        future: asyncio.Future[tuple[str, dict[str, Any] | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        msg_id = self._next_id()
+        self._pending[msg_id] = future
+        try:
+            await self._async_send_frame(msg_id, msg_type, data)
+            async with asyncio.timeout(timeout):
+                return await future
+        except TimeoutError as err:
+            raise BabyMonitarrConnectionError(
+                f"Timed out waiting for a reply to {msg_type}"
+            ) from err
+        finally:
+            self._pending.pop(msg_id, None)
 
     async def async_ping(self) -> str:
         """Application-level liveness check."""
@@ -325,3 +386,43 @@ class BabyMonitarrClient:
     async def async_set_active_room(self, room_id: int) -> str:
         """Set the active room."""
         return await self.async_send(CMD_SET_ACTIVE_ROOM, {"room_id": room_id})
+
+    # --- cast.* commands (protocol section 8.2) ----------------------------
+
+    async def async_cast_discovered(self, devices: list[dict[str, Any]]) -> str:
+        """Push the mDNS proxy's whole current set of receivers.
+
+        Always the full set, never a delta: the backend upserts and never removes
+        on absence, so a device that vanished simply stops being refreshed.
+        """
+        return await self.async_send(CMD_CAST_DISCOVERED, {"devices": devices})
+
+    async def async_cast_start(
+        self, room_id: int, device_ids: list[str] | None = None
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Start casting a room. Returns the ``cast.start_result`` (or ``error``).
+
+        Omitting ``device_ids`` casts to the room's saved targets.
+        """
+        data: dict[str, Any] = {"room_id": room_id}
+        if device_ids:
+            data["device_ids"] = device_ids
+        return await self.async_request(CMD_CAST_START, data)
+
+    async def async_cast_stop(self, room_id: int) -> tuple[str, dict[str, Any] | None]:
+        """Stop every session for a room."""
+        return await self.async_request(CMD_CAST_STOP, {"room_id": room_id})
+
+    async def async_cast_stop_device(
+        self, device_id: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Stop one device without touching the room's other targets."""
+        return await self.async_request(CMD_CAST_STOP_DEVICE, {"device_id": device_id})
+
+    async def async_cast_set_targets(
+        self, room_id: int, device_ids: list[str]
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Replace a room's saved target selection. Starts and stops nothing."""
+        return await self.async_request(
+            CMD_CAST_SET_TARGETS, {"room_id": room_id, "device_ids": device_ids}
+        )

@@ -11,7 +11,12 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, GLOBAL_DEVICE_ID
-from .coordinator import BabyMonitarrCoordinator, RoomInfo, RoomState
+from .coordinator import (
+    BabyMonitarrCoordinator,
+    CastRoomState,
+    RoomInfo,
+    RoomState,
+)
 
 
 def global_device_info(entry_id: str, coordinator: BabyMonitarrCoordinator) -> DeviceInfo:
@@ -84,6 +89,11 @@ class BabyMonitarrRoomEntity(BabyMonitarrEntity):
     def room_state(self) -> RoomState:
         """The room's live state."""
         return self.coordinator.data.state(self.room_id)
+
+    @property
+    def room_cast_state(self) -> CastRoomState:
+        """The room's cast state."""
+        return self.coordinator.data.cast_state(self.room_id)
 
     @property
     def available(self) -> bool:

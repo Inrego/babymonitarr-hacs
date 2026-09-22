@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -10,7 +12,9 @@ from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
 )
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
 from .api import (
     BabyMonitarrAuthError,
@@ -18,8 +22,10 @@ from .api import (
     BabyMonitarrConnectionError,
     normalise_ws_url,
 )
-from .const import CONF_API_KEY, CONF_HOST
+from .cast_proxy import BabyMonitarrCastProxy
+from .const import CONF_API_KEY, CONF_HOST, DOMAIN
 from .coordinator import BabyMonitarrCoordinator
+from .services import async_setup_services
 
 # The camera platform (native WebRTC over webrtc.*) lands in a later task and
 # joins this list then.
@@ -31,6 +37,16 @@ PLATFORMS: list[Platform] = [
 ]
 
 type BabyMonitarrConfigEntry = ConfigEntry[BabyMonitarrCoordinator]
+
+_LOGGER = logging.getLogger(__name__)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's services once, ahead of any config entry."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(
@@ -57,7 +73,28 @@ async def async_setup_entry(
     except BabyMonitarrConnectionError as err:
         raise ConfigEntryNotReady(str(err)) from err
 
+    try:
+        # Everything the entities need arrives in one snapshot, so wait for it
+        # rather than creating entities against an empty state.
+        await coordinator.async_wait_for_snapshot()
+    except TimeoutError as err:
+        await client.async_stop()
+        raise ConfigEntryNotReady(
+            "Timed out waiting for the BabyMonitarr snapshot"
+        ) from err
+
     entry.runtime_data = coordinator
+
+    # HA is the mDNS proxy: the backend's own browse cannot see link-local
+    # multicast from a Docker bridge network. Only start it if the backend says
+    # it speaks cast.
+    if coordinator.data.cast_supported:
+        proxy = BabyMonitarrCastProxy(hass, coordinator)
+        await proxy.async_start()
+        coordinator.cast_proxy = proxy
+    else:
+        _LOGGER.debug("Backend does not advertise 'cast'; mDNS proxy not started")
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -68,5 +105,9 @@ async def async_unload_entry(
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        await entry.runtime_data.client.async_stop()
+        coordinator = entry.runtime_data
+        if coordinator.cast_proxy is not None:
+            await coordinator.cast_proxy.async_stop()
+            coordinator.cast_proxy = None
+        await coordinator.client.async_stop()
     return unload_ok
