@@ -72,29 +72,39 @@ async def async_setup_entry(
     except BabyMonitarrConnectionError as err:
         raise ConfigEntryNotReady(str(err)) from err
 
+    # From here on the client owns a live socket and a reconnect loop, so every
+    # failure path has to stop it. Without this a failed setup leaves an orphan
+    # receive loop reconnecting forever, and the next setup attempt adds another.
     try:
         # Everything the entities need arrives in one snapshot, so wait for it
         # rather than creating entities against an empty state.
-        await coordinator.async_wait_for_snapshot()
-    except TimeoutError as err:
+        try:
+            await coordinator.async_wait_for_snapshot()
+        except TimeoutError as err:
+            raise ConfigEntryNotReady(
+                "Timed out waiting for the BabyMonitarr snapshot"
+            ) from err
+
+        entry.runtime_data = coordinator
+
+        # HA is the mDNS proxy: the backend's own browse cannot see link-local
+        # multicast from a Docker bridge network. Only start it if the backend
+        # says it speaks cast.
+        if coordinator.data.cast_supported:
+            proxy = BabyMonitarrCastProxy(hass, coordinator)
+            await proxy.async_start()
+            coordinator.cast_proxy = proxy
+        else:
+            _LOGGER.debug("Backend does not advertise 'cast'; mDNS proxy not started")
+
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        if coordinator.cast_proxy is not None:
+            await coordinator.cast_proxy.async_stop()
+            coordinator.cast_proxy = None
         await client.async_stop()
-        raise ConfigEntryNotReady(
-            "Timed out waiting for the BabyMonitarr snapshot"
-        ) from err
+        raise
 
-    entry.runtime_data = coordinator
-
-    # HA is the mDNS proxy: the backend's own browse cannot see link-local
-    # multicast from a Docker bridge network. Only start it if the backend says
-    # it speaks cast.
-    if coordinator.data.cast_supported:
-        proxy = BabyMonitarrCastProxy(hass, coordinator)
-        await proxy.async_start()
-        coordinator.cast_proxy = proxy
-    else:
-        _LOGGER.debug("Backend does not advertise 'cast'; mDNS proxy not started")
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
