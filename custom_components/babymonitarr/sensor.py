@@ -18,7 +18,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
-from .const import ATTR_CASTING_TO, ATTR_TARGET_IDS, ATTR_TARGET_NAMES
+from .const import (
+    ATTR_AVAILABLE_TARGETS,
+    ATTR_CASTING_TO,
+    ATTR_TARGET_IDS,
+    ATTR_TARGET_NAMES,
+)
 from .coordinator import (
     BabyMonitarrCoordinator,
     BabyMonitarrData,
@@ -77,6 +82,11 @@ ROOM_SENSORS: tuple[BabyMonitarrRoomSensorDescription, ...] = (
                 coordinator.data.device_name(session.device_id)
                 for session in cast.sessions
             ],
+            # Every receiver the backend knows about, so an automation author can
+            # see what babymonitarr.set_cast_targets will accept.
+            ATTR_AVAILABLE_TARGETS: sorted(
+                device.name for device in coordinator.data.cast_devices.values()
+            ),
         },
     ),
 )

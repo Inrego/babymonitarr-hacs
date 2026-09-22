@@ -67,11 +67,48 @@ class Bus:
         self.events.append((event_type, data))
 
 
+class ServiceCall:
+    """Carries the validated call data to a service handler."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = dict(data)
+
+
+class ServiceRegistry:
+    """Records registered services and calls them the way hass would."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[tuple[str, str], object] = {}
+
+    def async_register(self, domain, service, handler, schema=None) -> None:
+        self.handlers[(domain, service)] = handler
+
+    def has_service(self, domain: str, service: str) -> bool:
+        return (domain, service) in self.handlers
+
+    async def async_call(self, domain: str, service: str, data: dict) -> None:
+        """Call a handler directly. The voluptuous stub validates nothing, so a
+        harness passes data the real schema would already have coerced."""
+        await self.handlers[(domain, service)](ServiceCall(data))
+
+
+class ConfigEntries:
+    """Just the lookup `services._coordinator` does."""
+
+    def __init__(self, entries: list | None = None) -> None:
+        self.entries = entries if entries is not None else []
+
+    def async_loaded_entries(self, domain: str) -> list:
+        return list(self.entries)
+
+
 class Hass:
-    """A minimal hass object: an event bus and task creation."""
+    """A minimal hass object: an event bus, services and task creation."""
 
     def __init__(self) -> None:
         self.bus = Bus()
+        self.services = ServiceRegistry()
+        self.config_entries = ConfigEntries()
         self.tasks: list[object] = []
 
     def async_create_task(self, coro: object) -> object:
@@ -148,6 +185,62 @@ class HomeAssistantError(Exception):
 
 class ServiceValidationError(HomeAssistantError):
     """Bad input to a service call."""
+
+
+# --- sensor -----------------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class EntityDescription:
+    """The subset of the description fields this integration sets."""
+
+    key: str
+    translation_key: str | None = None
+    device_class: object = None
+    entity_category: object = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorEntityDescription(EntityDescription):
+    """Adds the sensor-only fields."""
+
+    state_class: object = None
+    native_unit_of_measurement: str | None = None
+    suggested_display_precision: int | None = None
+
+
+class SensorEntity(Entity):
+    """Resolves `native_value` and `extra_state_attributes` like the real base."""
+
+    @property
+    def state(self) -> object:
+        return self.native_value
+
+    @property
+    def native_value(self) -> object:
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        return None
+
+
+class SensorDeviceClass:
+    """Only the one this integration uses."""
+
+    SOUND_PRESSURE = "sound_pressure"
+
+
+class SensorStateClass:
+    """Only the one this integration uses."""
+
+    MEASUREMENT = "measurement"
+
+
+class UnitOfSoundPressure:
+    """Only the one this integration uses."""
+
+    DECIBEL = "dB"
 
 
 class Platform:
@@ -260,9 +353,14 @@ def install() -> None:
         HomeAssistant=Hass,
         callback=lambda func: func,
         CALLBACK_TYPE=object,
-        ServiceCall=object,
+        ServiceCall=ServiceCall,
     )
-    mod("homeassistant.const", Platform=Platform, EntityCategory=object)
+    mod(
+        "homeassistant.const",
+        Platform=Platform,
+        EntityCategory=object,
+        UnitOfSoundPressure=UnitOfSoundPressure,
+    )
     mod(
         "homeassistant.exceptions",
         ConfigEntryAuthFailed=Exception,
@@ -288,11 +386,18 @@ def install() -> None:
         DataUpdateCoordinator=DataUpdateCoordinator,
         CoordinatorEntity=CoordinatorEntity,
     )
-    mod("homeassistant.helpers.entity", Entity=Entity)
+    mod("homeassistant.helpers.entity", Entity=Entity, EntityDescription=EntityDescription)
     sys.modules["homeassistant.helpers"].config_validation = sys.modules[
         "homeassistant.helpers.config_validation"
     ]
     mod("homeassistant.components").__path__ = []
+    mod(
+        "homeassistant.components.sensor",
+        SensorDeviceClass=SensorDeviceClass,
+        SensorEntity=SensorEntity,
+        SensorEntityDescription=SensorEntityDescription,
+        SensorStateClass=SensorStateClass,
+    )
     mod("homeassistant.components.zeroconf", async_get_async_instance=None)
     mod(
         "homeassistant.components.camera",
@@ -322,6 +427,19 @@ class Results:
     def expect_raises(self, label, exc, func, *args) -> None:
         try:
             func(*args)
+        except exc:
+            return
+        except Exception as err:  # noqa: BLE001 - the point is to report the type
+            self.failures.append(
+                f"{label}: raised {type(err).__name__}, want {exc.__name__}"
+            )
+            return
+        self.failures.append(f"{label}: nothing raised, want {exc.__name__}")
+
+    async def expect_raises_async(self, label, exc, coro) -> None:
+        """`expect_raises` for an awaitable, which the service handlers all are."""
+        try:
+            await coro
         except exc:
             return
         except Exception as err:  # noqa: BLE001 - the point is to report the type

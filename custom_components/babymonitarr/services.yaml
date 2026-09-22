@@ -11,6 +11,23 @@ cast_room:
       selector:
         object:
 
+set_cast_targets:
+  fields:
+    room:
+      required: true
+      example: Nursery
+      selector:
+        text:
+    targets:
+      required: true
+      example: '["Living Room TV", "Kitchen Speaker"]'
+      # A repeated text field rather than a select: the receiver list is discovered
+      # at runtime and services.yaml options are static. The names to type are on
+      # sensor.<room>_cast_targets as the available_targets attribute.
+      selector:
+        text:
+          multiple: true
+
 stop_cast:
   fields:
     room:

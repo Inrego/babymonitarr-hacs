@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HARNESSES = ("test_protocol.py", "test_cast.py", "test_camera.py")
+HARNESSES = ("test_protocol.py", "test_cast.py", "test_camera.py", "test_services.py")
 
 
 def main() -> int:

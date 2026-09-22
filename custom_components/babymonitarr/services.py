@@ -1,7 +1,7 @@
 """Services for BabyMonitarr.
 
-``cast_room`` and ``stop_cast`` drive the backend's ``cast.*`` commands.
-``snapshot`` is registered but always fails: see :func:`_async_snapshot`.
+``cast_room``, ``stop_cast`` and ``set_cast_targets`` drive the backend's ``cast.*``
+commands. ``snapshot`` is registered but always fails: see :func:`_async_snapshot`.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .const import (
     ATTR_TARGETS,
     DOMAIN,
     SERVICE_CAST_ROOM,
+    SERVICE_SET_CAST_TARGETS,
     SERVICE_SNAPSHOT,
     SERVICE_STOP_CAST,
 )
@@ -34,6 +35,16 @@ CAST_ROOM_SCHEMA = vol.Schema(
 )
 
 STOP_CAST_SCHEMA = vol.Schema({vol.Required(ATTR_ROOM): cv.string})
+
+# ``targets`` is required but may be empty: an empty list is how the user clears
+# a room's saved selection, which is exactly what the backend does with an empty
+# ``device_ids`` (protocol doc, section "cast.set_targets").
+SET_CAST_TARGETS_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_ROOM): cv.string,
+        vol.Required(ATTR_TARGETS): vol.All(cv.ensure_list, [cv.string]),
+    }
+)
 
 SNAPSHOT_SCHEMA = vol.Schema({vol.Required(ATTR_ROOM): cv.string})
 
@@ -90,6 +101,22 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 "none were given."
             )
 
+    async def _async_set_cast_targets(call: ServiceCall) -> None:
+        """Replace a room's saved target selection.
+
+        This is the only way from Home Assistant to populate the selection that
+        ``cast_room`` falls back on; without it a room casts only to whatever was
+        picked in the BabyMonitarr web UI. The backend answers with an ack plus a
+        broadcast ``cast.state``, so ``sensor.<room>_cast_targets`` follows on its
+        own - nothing here writes entity state.
+        """
+        coordinator = _coordinator(hass)
+        _require_cast(coordinator)
+        room_id = coordinator.resolve_room(call.data[ATTR_ROOM])
+        device_ids = coordinator.resolve_targets(call.data[ATTR_TARGETS])
+
+        await coordinator.async_cast_set_targets(room_id, device_ids)
+
     async def _async_stop_cast(call: ServiceCall) -> None:
         """Stop every cast session for a room."""
         coordinator = _coordinator(hass)
@@ -116,6 +143,12 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN, SERVICE_CAST_ROOM, _async_cast_room, schema=CAST_ROOM_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_CAST_TARGETS,
+        _async_set_cast_targets,
+        schema=SET_CAST_TARGETS_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN, SERVICE_STOP_CAST, _async_stop_cast, schema=STOP_CAST_SCHEMA

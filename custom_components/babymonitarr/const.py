@@ -97,6 +97,7 @@ GLOBAL_DEVICE_ID: Final = "global"
 
 SERVICE_CAST_ROOM: Final = "cast_room"
 SERVICE_STOP_CAST: Final = "stop_cast"
+SERVICE_SET_CAST_TARGETS: Final = "set_cast_targets"
 SERVICE_SNAPSHOT: Final = "snapshot"
 
 ATTR_ROOM: Final = "room"
@@ -106,6 +107,9 @@ ATTR_TARGETS: Final = "targets"
 ATTR_TARGET_IDS: Final = "target_ids"
 ATTR_TARGET_NAMES: Final = "target_names"
 ATTR_CASTING_TO: Final = "casting_to"
+# Every receiver the backend knows about, so an automation author can read the
+# names set_cast_targets accepts without leaving Home Assistant.
+ATTR_AVAILABLE_TARGETS: Final = "available_targets"
 
 # --- Zeroconf cast proxy ----------------------------------------------------
 

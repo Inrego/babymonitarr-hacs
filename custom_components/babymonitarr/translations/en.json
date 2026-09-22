@@ -99,6 +99,20 @@
         }
       }
     },
+    "set_cast_targets": {
+      "name": "Set cast targets",
+      "description": "Saves which Cast receivers a room casts to. Replaces the room's existing selection; an empty list clears it. Starts and stops nothing.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "Name or id of the BabyMonitarr room."
+        },
+        "targets": {
+          "name": "Targets",
+          "description": "Cast receivers to save, by name or device id. The names this backend knows are listed on the room's Cast targets sensor, as its available_targets attribute."
+        }
+      }
+    },
     "stop_cast": {
       "name": "Stop cast",
       "description": "Stops every cast session for a room.",

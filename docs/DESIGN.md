@@ -50,7 +50,8 @@ One global device: `number.sound_threshold`, `number.threshold_pause`,
 `sensor.active_room`, `sensor.connected_viewers`, `update.babymonitarr`.
 
 Services: `babymonitarr.cast_room(room, targets[])`, `babymonitarr.stop_cast(room)`,
-`babymonitarr.snapshot(room)`, plus device triggers for the sound event.
+`babymonitarr.set_cast_targets(room, targets[])`, `babymonitarr.snapshot(room)`, plus device
+triggers for the sound event.
 
 Talk-back is out of scope; there is no two-way audio path in the backend.
 
