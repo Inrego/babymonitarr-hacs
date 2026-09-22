@@ -2,10 +2,74 @@
   "config": {
     "step": {
       "user": {
+        "title": "Connect to BabyMonitarr",
+        "description": "Enter the address of your BabyMonitarr backend and an API key created in the BabyMonitarr UI.",
         "data": {
           "host": "Host",
           "api_key": "API key"
+        },
+        "data_description": {
+          "host": "Host name or URL of the backend, for example 192.168.1.10:5000 or https://babymonitarr.local",
+          "api_key": "A BabyMonitarr API key. No Home Assistant token is stored in BabyMonitarr."
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate BabyMonitarr",
+        "description": "The BabyMonitarr API key was rejected. Enter a new one.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid API key",
+      "invalid_host": "That does not look like a valid host or URL",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single BabyMonitarr backend is supported.",
+      "already_configured": "BabyMonitarr is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "sound": {
+        "name": "Sound"
+      },
+      "stream_online": {
+        "name": "Stream online"
+      }
+    },
+    "sensor": {
+      "sound_level": {
+        "name": "Sound level"
+      },
+      "active_room": {
+        "name": "Active room"
+      },
+      "connected_viewers": {
+        "name": "Connected viewers"
+      }
+    },
+    "switch": {
+      "monitoring": {
+        "name": "Monitoring"
+      },
+      "audio_filter": {
+        "name": "Audio filter"
+      }
+    },
+    "number": {
+      "sound_threshold": {
+        "name": "Sound threshold"
+      },
+      "threshold_pause": {
+        "name": "Threshold pause"
+      },
+      "volume_adjustment": {
+        "name": "Volume adjustment"
       }
     }
   }
