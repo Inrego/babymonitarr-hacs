@@ -7,10 +7,15 @@ cast entities hang off the same room device via :func:`room_device_info`.
 
 from __future__ import annotations
 
+import logging
+from urllib.parse import urlsplit, urlunsplit
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, GLOBAL_DEVICE_ID
+from .const import DOMAIN, GLOBAL_DEVICE_ID, WS_PATH
 from .coordinator import (
     BabyMonitarrCoordinator,
     CastRoomState,
@@ -18,28 +23,72 @@ from .coordinator import (
     RoomState,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
+# HA 2026.9 deprecated ``DeviceInfo``'s ``via_device`` in favour of
+# ``via_device_id`` and raises rather than warns on the config-flow path, which
+# takes every room entity down with it. Core ships this helper for exactly the
+# via-device lookup; its presence is the feature probe, the way camera.py reads
+# the candidate dataclass rather than branching on a version number.
+_async_via_device_id = getattr(dr, "async_get_device_id_by_identifier", None)
+
+
+def web_url(ws_url: str) -> str:
+    """The backend's web UI URL, derived from the WebSocket URL.
+
+    The device registry only accepts ``http``/``https`` in ``configuration_url``;
+    handing it the ``ws(s)`` URL raises ``ValueError`` and every entity on the hub
+    device fails to be added.
+    """
+    split = urlsplit(ws_url)
+    scheme = {"ws": "http", "wss": "https"}.get(split.scheme, split.scheme)
+    path = split.path.removesuffix(WS_PATH)
+    return urlunsplit((scheme, split.netloc, f"{path}/", "", ""))
+
+
+def hub_identifier(entry_id: str) -> tuple[str, str]:
+    """The hub device's registry identifier."""
+    return (DOMAIN, f"{entry_id}_{GLOBAL_DEVICE_ID}")
+
 
 def global_device_info(entry_id: str, coordinator: BabyMonitarrCoordinator) -> DeviceInfo:
     """The single hub device."""
     return DeviceInfo(
-        identifiers={(DOMAIN, f"{entry_id}_{GLOBAL_DEVICE_ID}")},
+        identifiers={hub_identifier(entry_id)},
         name="BabyMonitarr",
         manufacturer="BabyMonitarr",
         model="Hub",
         sw_version=coordinator.data.server_version,
-        configuration_url=coordinator.client.url,
+        configuration_url=web_url(coordinator.client.url),
     )
 
 
-def room_device_info(entry_id: str, room: RoomInfo) -> DeviceInfo:
-    """One device per room, parented to the hub device."""
-    return DeviceInfo(
+def room_device_info(
+    hass: HomeAssistant, entry_id: str, room: RoomInfo
+) -> DeviceInfo:
+    """One device per room, parented to the hub device.
+
+    ``async_setup_entry`` registers the hub device before forwarding the
+    platforms, so the lookup below always resolves.
+    """
+    info = DeviceInfo(
         identifiers={(DOMAIN, f"{entry_id}_room_{room.room_id}")},
         name=room.name,
         manufacturer="BabyMonitarr",
         model="Room",
-        via_device=(DOMAIN, f"{entry_id}_{GLOBAL_DEVICE_ID}"),
     )
+    if _async_via_device_id is None:
+        info["via_device"] = hub_identifier(entry_id)
+        return info
+    try:
+        info["via_device_id"] = _async_via_device_id(
+            hass, hub_identifier(entry_id), config_entry_id=entry_id
+        )
+    except ValueError:
+        # Setup registers the hub device first, so this should not happen - and a
+        # room device with no parent is still a working device.
+        _LOGGER.debug("No hub device to parent room %s to", room.room_id)
+    return info
 
 
 class BabyMonitarrEntity(CoordinatorEntity[BabyMonitarrCoordinator]):
@@ -78,7 +127,9 @@ class BabyMonitarrRoomEntity(BabyMonitarrEntity):
         super().__init__(coordinator, f"room_{room_id}_{key}")
         self.room_id = room_id
         room = coordinator.data.rooms[room_id]
-        self._attr_device_info = room_device_info(self._entry_id, room)
+        self._attr_device_info = room_device_info(
+            coordinator.hass, self._entry_id, room
+        )
 
     @property
     def room(self) -> RoomInfo | None:

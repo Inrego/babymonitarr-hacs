@@ -13,6 +13,7 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
 )
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
@@ -25,6 +26,7 @@ from .api import (
 from .cast_proxy import BabyMonitarrCastProxy
 from .const import CONF_API_KEY, CONF_HOST, DOMAIN
 from .coordinator import BabyMonitarrCoordinator
+from .entity import global_device_info
 from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [
@@ -86,6 +88,13 @@ async def async_setup_entry(
             ) from err
 
         entry.runtime_data = coordinator
+
+        # Register the hub device up front: the room devices parent themselves to
+        # it by registry id, which only exists once the hub device does.
+        dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id,
+            **global_device_info(entry.entry_id, coordinator),
+        )
 
         # HA is the mDNS proxy: the backend's own browse cannot see link-local
         # multicast from a Docker bridge network. Only start it if the backend

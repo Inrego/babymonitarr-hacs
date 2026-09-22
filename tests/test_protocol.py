@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from custom_components.babymonitarr.api import normalise_ws_url
 from custom_components.babymonitarr.coordinator import BabyMonitarrCoordinator
+from custom_components.babymonitarr.entity import web_url
 
 results = stubs.Results("protocol")
 check = results.check
@@ -33,6 +34,12 @@ try:
     results.failures.append("bad scheme: no raise")
 except ValueError:
     pass
+
+# The device registry rejects a ws(s) configuration_url outright, which takes
+# every entity on the hub device down with it.
+check("web url wss", web_url("wss://bm.local/ha/ws"), "https://bm.local/")
+check("web url ws", web_url("ws://1.2.3.4:5000/ha/ws"), "http://1.2.3.4:5000/")
+check("web url subpath", web_url("wss://bm.local/baby/ha/ws"), "https://bm.local/baby/")
 
 # --- coordinator folds against the documented frames ---
 hass = stubs.Hass()

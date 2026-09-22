@@ -101,6 +101,10 @@ class BabyMonitarrCamera(BabyMonitarrRoomEntity, Camera):
     def __init__(self, coordinator: BabyMonitarrCoordinator, room_id: int) -> None:
         """Initialise the camera."""
         super().__init__(coordinator, room_id, "camera")
+        # CoordinatorEntity.__init__ stops the chain before Camera's, so Camera's
+        # own attributes (``_webrtc_provider`` and friends) are never set and
+        # adding the entity raises AttributeError. Run it explicitly.
+        Camera.__init__(self)
         # One peer per (connection, room, kind), so one live session per camera.
         self._session_id: str | None = None
         self._send_message: WebRTCSendMessage | None = None
