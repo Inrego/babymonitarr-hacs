@@ -40,6 +40,9 @@ MSG_PONG: Final = "pong"
 MSG_CAST_DEVICES: Final = "cast.devices"
 MSG_CAST_STATE: Final = "cast.state"
 MSG_CAST_START_RESULT: Final = "cast.start_result"
+MSG_WEBRTC_ANSWER: Final = "webrtc.answer"
+MSG_WEBRTC_CANDIDATE: Final = "webrtc.candidate"
+MSG_WEBRTC_CLOSED: Final = "webrtc.closed"
 
 # Client -> server commands.
 CMD_PING: Final = "ping"
@@ -52,9 +55,23 @@ CMD_CAST_START: Final = "cast.start"
 CMD_CAST_STOP: Final = "cast.stop"
 CMD_CAST_STOP_DEVICE: Final = "cast.stop_device"
 CMD_CAST_SET_TARGETS: Final = "cast.set_targets"
+CMD_WEBRTC_OFFER: Final = "webrtc.offer"
+CMD_WEBRTC_CANDIDATE: Final = "webrtc.candidate"
+CMD_WEBRTC_STOP: Final = "webrtc.stop"
 
-# hello.features entry that gates everything cast-related.
+# hello.features entries that gate the two prefixed message spaces.
 FEATURE_CAST: Final = "cast"
+FEATURE_WEBRTC: Final = "webrtc"
+
+# Error codes the WebRTC path can answer an offer with.
+ERROR_WEBRTC_CODEC_MISMATCH: Final = "webrtc_codec_mismatch"
+ERROR_WEBRTC_FAILED: Final = "webrtc_failed"
+
+# Video and audio are separate peer connections, selected by kind. The camera
+# entity only ever negotiates video; levels come from the sound_level message,
+# which needs no peer connection at all.
+WEBRTC_KIND_VIDEO: Final = "video"
+WEBRTC_KIND_AUDIO: Final = "audio"
 
 # Global settings field names, exactly as the protocol spells them.
 SETTING_SOUND_THRESHOLD_DB: Final = "sound_threshold_db"

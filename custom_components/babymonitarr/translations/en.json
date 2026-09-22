@@ -119,5 +119,22 @@
         }
       }
     }
+  },
+  "exceptions": {
+    "webrtc_not_supported": {
+      "message": "This BabyMonitarr backend does not advertise the 'webrtc' feature, so it cannot answer a camera offer."
+    },
+    "webrtc_codec_mismatch": {
+      "message": "BabyMonitarr can only forward the codec the camera already produces, and this offer did not list it."
+    },
+    "webrtc_failed": {
+      "message": "BabyMonitarr could not negotiate the stream."
+    },
+    "webrtc_disconnected": {
+      "message": "The connection to BabyMonitarr was lost."
+    },
+    "webrtc_superseded": {
+      "message": "Another Home Assistant session started streaming this camera."
+    }
   }
 }

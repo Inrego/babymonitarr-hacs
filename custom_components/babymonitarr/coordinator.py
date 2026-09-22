@@ -27,6 +27,7 @@ from .const import (
     DOMAIN,
     EVENT_SOUND_DETECTED,
     FEATURE_CAST,
+    FEATURE_WEBRTC,
     MSG_ACK,
     MSG_ACTIVE_ROOM,
     MSG_CAST_DEVICES,
@@ -45,6 +46,9 @@ from .const import (
     MSG_SOUND_LEVEL,
     MSG_SOUND_STATE,
     MSG_STREAM_ONLINE,
+    MSG_WEBRTC_ANSWER,
+    MSG_WEBRTC_CANDIDATE,
+    MSG_WEBRTC_CLOSED,
     SNAPSHOT_TIMEOUT,
 )
 
@@ -55,6 +59,8 @@ _LOGGER = logging.getLogger(__name__)
 
 NewRoomsCallback = Callable[[list[int]], None]
 SnapshotCallback = Callable[[], None]
+# (message type, data) for one (room, kind) peer.
+WebRtcCallback = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(slots=True)
@@ -157,6 +163,11 @@ class BabyMonitarrData:
         """Whether the connected backend advertises the cast feature."""
         return FEATURE_CAST in self.features
 
+    @property
+    def webrtc_supported(self) -> bool:
+        """Whether the connected backend advertises the WebRTC feature."""
+        return FEATURE_WEBRTC in self.features
+
     def device_name(self, device_id: str) -> str:
         """The friendly name of a receiver, falling back to its id."""
         device = self.cast_devices.get(device_id)
@@ -183,6 +194,7 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         self.cast_proxy: BabyMonitarrCastProxy | None = None
         self._new_rooms_callbacks: list[NewRoomsCallback] = []
         self._snapshot_callbacks: list[SnapshotCallback] = []
+        self._webrtc_callbacks: dict[tuple[int, str], WebRtcCallback] = {}
         self._snapshot_received = asyncio.Event()
         client.set_callbacks(self.handle_message, self.handle_connection)
 
@@ -227,6 +239,26 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         async with asyncio.timeout(timeout):
             await self._snapshot_received.wait()
 
+    @callback
+    def async_register_webrtc(
+        self, room_id: int, kind: str, cb: WebRtcCallback
+    ) -> CALLBACK_TYPE:
+        """Route this peer's unsolicited ``webrtc.*`` frames to ``cb``.
+
+        The backend keeps one peer per (connection, room, kind), so that tuple is
+        the whole routing key. ``webrtc.answer`` is not routed here - it carries a
+        ``ref`` and is returned to whoever sent the offer.
+        """
+        key = (room_id, kind)
+        self._webrtc_callbacks[key] = cb
+
+        @callback
+        def _remove() -> None:
+            if self._webrtc_callbacks.get(key) is cb:
+                del self._webrtc_callbacks[key]
+
+        return _remove
+
     # --- transport callbacks ------------------------------------------------
 
     @callback
@@ -238,6 +270,7 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
             # re-sends the full snapshot on connect, so we do not clear the room
             # list (that would churn entities on every blip).
             self._snapshot_received.clear()
+            self._async_fail_webrtc_peers("The connection to BabyMonitarr dropped")
             _LOGGER.debug("BabyMonitarr disconnected")
         self.async_set_updated_data(self.data)
 
@@ -455,6 +488,38 @@ class BabyMonitarrCoordinator(DataUpdateCoordinator[BabyMonitarrData]):
         self.data.state(room_id).monitoring = bool(data.get("enabled", False))
         return True
 
+    def _on_webrtc(self, data: dict[str, Any], msg_type: str) -> bool:
+        """Hand one unsolicited ``webrtc.*`` frame to the peer that owns it."""
+        room_id = data.get("room_id")
+        kind = data.get("kind")
+        if not isinstance(room_id, int) or not isinstance(kind, str):
+            return False
+        cb = self._webrtc_callbacks.get((room_id, kind))
+        if cb is None:
+            # A candidate for a peer we already tore down; dropping it is correct.
+            _LOGGER.debug("No WebRTC peer for room %s %s; dropping %s", room_id, kind, msg_type)
+            return False
+        cb(msg_type, data)
+        # WebRTC signalling moves no entity state.
+        return False
+
+    def _on_webrtc_candidate(self, data: dict[str, Any]) -> bool:
+        return self._on_webrtc(data, MSG_WEBRTC_CANDIDATE)
+
+    def _on_webrtc_closed(self, data: dict[str, Any]) -> bool:
+        return self._on_webrtc(data, MSG_WEBRTC_CLOSED)
+
+    @callback
+    def _async_fail_webrtc_peers(self, reason: str) -> None:
+        """Tell every peer it is gone.
+
+        Protocol section 5: a dropped socket closes every peer it owned server-side
+        and no ``webrtc.closed`` arrives, because the socket carrying it is already
+        gone. Without this the frontend would sit on a frozen stream.
+        """
+        for (room_id, kind), cb in list(self._webrtc_callbacks.items()):
+            cb(MSG_WEBRTC_CLOSED, {"room_id": room_id, "kind": kind, "reason": reason})
+
     def _on_error(self, data: dict[str, Any]) -> bool:
         _LOGGER.warning(
             "BabyMonitarr error %s: %s", data.get("code"), data.get("message")
@@ -574,6 +639,10 @@ _HANDLERS: dict[str, Callable[[BabyMonitarrCoordinator, dict[str, Any]], bool]] 
     MSG_STREAM_ONLINE: BabyMonitarrCoordinator._on_stream_online,
     MSG_CAST_DEVICES: BabyMonitarrCoordinator._on_cast_devices,
     MSG_CAST_STATE: BabyMonitarrCoordinator._on_cast_state,
+    MSG_WEBRTC_CANDIDATE: BabyMonitarrCoordinator._on_webrtc_candidate,
+    MSG_WEBRTC_CLOSED: BabyMonitarrCoordinator._on_webrtc_closed,
+    # Carries a ref, so async_request has already returned it to the offerer.
+    MSG_WEBRTC_ANSWER: BabyMonitarrCoordinator._ignore,
     MSG_MONITORING: BabyMonitarrCoordinator._on_monitoring,
     MSG_ERROR: BabyMonitarrCoordinator._on_error,
     MSG_ACK: BabyMonitarrCoordinator._ignore,

@@ -28,6 +28,9 @@ from .const import (
     CMD_SET_ACTIVE_ROOM,
     CMD_SET_GLOBAL_SETTINGS,
     CMD_SET_MONITORING,
+    CMD_WEBRTC_CANDIDATE,
+    CMD_WEBRTC_OFFER,
+    CMD_WEBRTC_STOP,
     MSG_HELLO,
     PROTOCOL_VERSION,
     RECONNECT_INITIAL_DELAY,
@@ -418,6 +421,54 @@ class BabyMonitarrClient:
     ) -> tuple[str, dict[str, Any] | None]:
         """Stop one device without touching the room's other targets."""
         return await self.async_request(CMD_CAST_STOP_DEVICE, {"device_id": device_id})
+
+    # --- webrtc.* commands (protocol section 8.1) --------------------------
+
+    async def async_webrtc_offer(
+        self, room_id: int, kind: str, sdp: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Hand the backend an offer and wait for its answer.
+
+        The client offers and the backend answers - the opposite of the backend's
+        SignalR flow, and the direction Home Assistant's camera API needs. The SDP
+        goes over verbatim; the backend picks the room's passthrough codec out of
+        it and rejects the offer outright if it is not there.
+        """
+        return await self.async_request(
+            CMD_WEBRTC_OFFER, {"room_id": room_id, "kind": kind, "sdp": sdp}
+        )
+
+    async def async_webrtc_candidate(
+        self,
+        room_id: int,
+        kind: str,
+        candidate: str,
+        sdp_mid: str | None = None,
+        sdp_m_line_index: int | None = None,
+    ) -> str:
+        """Trickle one client ICE candidate.
+
+        There is no reply, not even an ack - candidates are high-rate, and one for
+        a peer that no longer exists is dropped server-side.
+        """
+        return await self.async_send(
+            CMD_WEBRTC_CANDIDATE,
+            {
+                "room_id": room_id,
+                "kind": kind,
+                "candidate": candidate,
+                "sdp_mid": sdp_mid,
+                "sdp_m_line_index": sdp_m_line_index,
+            },
+        )
+
+    async def async_webrtc_stop(
+        self, room_id: int, kind: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Close one peer. Stopping a peer that does not exist is a success."""
+        return await self.async_request(
+            CMD_WEBRTC_STOP, {"room_id": room_id, "kind": kind}
+        )
 
     async def async_cast_set_targets(
         self, room_id: int, device_ids: list[str]

@@ -27,10 +27,9 @@ from .const import CONF_API_KEY, CONF_HOST, DOMAIN
 from .coordinator import BabyMonitarrCoordinator
 from .services import async_setup_services
 
-# The camera platform (native WebRTC over webrtc.*) lands in a later task and
-# joins this list then.
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.CAMERA,
     Platform.NUMBER,
     Platform.SENSOR,
     Platform.SWITCH,
