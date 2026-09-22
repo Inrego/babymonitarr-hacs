@@ -39,11 +39,13 @@ async def async_setup_entry(
 class BabyMonitarrMonitoringSwitch(BabyMonitarrRoomEntity, SwitchEntity):
     """The always-on subscription for one room.
 
-    The backend is the source of truth: monitoring survives a dropped connection
-    but resets to off when the backend restarts, and the snapshot always tells the
-    truth. So this switch reflects ``room_state.monitoring`` rather than restoring a
-    remembered HA state - protocol section 5. It defaults off; that is intentional,
-    because monitoring keeps the room's reader (and its ffmpeg pipeline) alive.
+    The backend is the source of truth: monitoring survives both a dropped
+    connection and a backend restart (it is persisted backend-side), and the
+    snapshot always tells the truth. So this switch reflects
+    ``room_state.monitoring`` rather than restoring a remembered HA state, and
+    never re-asserts its own cached value on connect - protocol section 5. It
+    defaults off for a new room; that is intentional, because monitoring keeps the
+    room's reader (and its ffmpeg pipeline) alive.
     """
 
     _attr_translation_key = "monitoring"

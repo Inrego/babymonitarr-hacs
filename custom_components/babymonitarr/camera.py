@@ -105,6 +105,8 @@ class BabyMonitarrCamera(BabyMonitarrRoomEntity, Camera):
         self._session_id: str | None = None
         self._send_message: WebRTCSendMessage | None = None
         self._unsub_webrtc: CALLBACK_TYPE | None = None
+        # Set while an offer is awaiting its reply. See _handle_webrtc_message.
+        self._offer_in_flight: str | None = None
 
     # --- native WebRTC ------------------------------------------------------
 
@@ -139,6 +141,7 @@ class BabyMonitarrCamera(BabyMonitarrRoomEntity, Camera):
             self.room_id, WEBRTC_KIND_VIDEO, self._handle_webrtc_message
         )
 
+        self._offer_in_flight = session_id
         try:
             msg_type, data = await self.coordinator.client.async_webrtc_offer(
                 self.room_id, WEBRTC_KIND_VIDEO, offer_sdp
@@ -147,6 +150,9 @@ class BabyMonitarrCamera(BabyMonitarrRoomEntity, Camera):
             self._async_clear_session(session_id)
             send_message(WebRTCError(ERROR_DISCONNECTED, str(err)))
             return
+        finally:
+            if self._offer_in_flight == session_id:
+                self._offer_in_flight = None
 
         payload = data or {}
         if msg_type == MSG_ERROR:
@@ -231,6 +237,19 @@ class BabyMonitarrCamera(BabyMonitarrRoomEntity, Camera):
             return
 
         if msg_type == MSG_WEBRTC_CLOSED:
+            if self._offer_in_flight is not None:
+                # A closed frame that lands while our own offer is in flight is
+                # about the peer this offer is replacing, or about the half-built
+                # one whose failure the reply itself reports. Routing is by
+                # (room, kind) only, so the old peer's frame is indistinguishable
+                # from the new peer's - and acting on it would kill the session we
+                # are still setting up. The offer's reply is the verdict.
+                _LOGGER.debug(
+                    "Ignoring webrtc.closed for room %s during an in-flight offer: %s",
+                    self.room_id,
+                    data.get("reason"),
+                )
+                return
             reason = data.get("reason") or "The BabyMonitarr peer was closed."
             self._async_end_session(ERROR_DISCONNECTED, str(reason))
 

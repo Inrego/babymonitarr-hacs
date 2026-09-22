@@ -43,6 +43,9 @@ class FakeClient:
                                                      "sdp": ANSWER_SDP})
         self.offer_error: Exception | None = None
         self.candidate_error: Exception | None = None
+        # Frames the backend pushes while it is handling the offer, before its
+        # reply: a supersede sends webrtc.closed for the peer it replaces.
+        self.during_offer: list[tuple] = []
 
     def set_callbacks(self, message_callback, connection_callback) -> None:
         self.message_callback = message_callback
@@ -50,6 +53,8 @@ class FakeClient:
 
     async def async_webrtc_offer(self, room_id, kind, sdp):
         self.offers.append((room_id, kind, sdp))
+        for msg_type, data in self.during_offer:
+            self.message_callback(msg_type, data, None)
         if self.offer_error is not None:
             raise self.offer_error
         return self.offer_reply
@@ -312,6 +317,45 @@ async def test_lifecycle():
 
 
 asyncio.run(test_lifecycle())
+
+
+# --- a closed frame that races our own offer --------------------------------
+async def test_closed_during_offer():
+    """The supersede seam: closed frames are routed by (room, kind) only.
+
+    When a second offer for the same room arrives, the backend closes the peer it
+    replaces and reports it - on the wire that webrtc.closed lands *before* the
+    answer to the offer that caused it, and is indistinguishable from a frame
+    about the new peer. Acting on it would kill the session being set up.
+    """
+    rig = build_camera()
+    first, second = [], []
+    await rig.cam.async_handle_async_webrtc_offer(OFFER_SDP, "s1", first.append)
+
+    rig.client.during_offer = [(
+        "webrtc.closed",
+        {"room_id": 1, "kind": "video",
+         "reason": "Replaced by a new offer for the same room"},
+    )]
+    await rig.cam.async_handle_async_webrtc_offer(OFFER_SDP, "s2", second.append)
+
+    check("new session answered", len(messages_of(second, stubs.WebRTCAnswer)), 1)
+    check("new session not errored", len(messages_of(second, stubs.WebRTCError)), 0)
+    check("new session still current", rig.cam._session_id, "s2")
+    check("in-flight flag cleared", rig.cam._offer_in_flight, None)
+
+    # And once the offer has settled, a genuine closed frame still ends it.
+    rig.coordinator.handle_message(
+        "webrtc.closed", {"room_id": 1, "kind": "video", "reason": "Peer connection failed"},
+        None,
+    )
+    errors = messages_of(second, stubs.WebRTCError)
+    check("later closed surfaced", len(errors), 1)
+    check("later closed reason", errors[0].message, "Peer connection failed")
+    check("later closed clears the session", rig.cam._session_id, None)
+
+
+asyncio.run(test_closed_during_offer())
 
 
 # --- no still image, and the older candidate shape ---------------------------
